@@ -10,8 +10,8 @@ FABRIC_SAMPLES_DIR="${FABRIC_SAMPLES_DIR:-$HOME/fabric-samples}"
 PEER_ORG_SETUP_DIR="${PEER_ORG_SETUP_DIR:-$HOME/peer-org-setup}"
 
 # Fabric and CA versions (adjust as needed)
-FABRIC_VERSION="3.0.0"
-CA_VERSION="1.5.10"     # Compatible CA version for 3.0.x
+FABRIC_VERSION="2.5.5" # Reverted to LTS
+CA_VERSION="1.5.9"     # Compatible CA version for 2.5.x
 
 # Org and CA Configuration
 ORG_NAME="Org1"
@@ -23,7 +23,7 @@ CA_PORT=7054
 CA_ADMIN_USER="admin"
 CA_ADMIN_PASS="adminpw"
 CA_IMAGE_TAG="1.5" # Use tag compatible with CA_VERSION
-PEER_IMAGE_TAG="3.0" # Use tag compatible with FABRIC_VERSION
+PEER_IMAGE_TAG="2.5" # Use tag compatible with FABRIC_VERSION
 
 # --- Helper Functions ---
 command_exists() {
@@ -304,8 +304,9 @@ echo "#############################################"
 
 if [ ! -d "$FABRIC_SAMPLES_DIR" ]; then
   echo "Cloning Hyperledger Fabric Samples v${FABRIC_VERSION} into '$FABRIC_SAMPLES_DIR'..."
-  TARGET_TAG="v${FABRIC_VERSION}" # Try exact v3.0.0 tag
-  TARGET_BRANCH="release-${FABRIC_VERSION%.*}" # e.g., release-3.0
+  TARGET_TAG="v${FABRIC_VERSION%.*}" # Use major.minor tag like v2.5
+  # TARGET_TAG="v${FABRIC_VERSION}" # Can try specific patch version tag too
+  TARGET_BRANCH="release-${FABRIC_VERSION%.*}" # e.g., release-2.5
   if git ls-remote --tags https://github.com/hyperledger/fabric-samples | grep -q "refs/tags/${TARGET_TAG}$"; then
       echo "Checking out tag '${TARGET_TAG}'..."
       git clone --depth 1 --branch ${TARGET_TAG} https://github.com/hyperledger/fabric-samples.git "$FABRIC_SAMPLES_DIR"
