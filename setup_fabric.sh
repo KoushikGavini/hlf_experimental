@@ -100,18 +100,74 @@ fi
 
 # 2. Docker
 if ! command_exists docker; then
-  echo "Docker not found. Please install Docker manually following the official instructions for your OS:"
-  echo "https://docs.docker.com/engine/install/"
-  echo "Ensure the Docker daemon is running."
-  exit 1
-else
-  echo "Docker found: $(docker --version)"
-  if ! docker info > /dev/null 2>&1; then
-     echo "Docker daemon is not running. Please start Docker and ensure your user has permissions."
-     echo "(On Linux, you might need: sudo systemctl start docker && sudo usermod -aG docker \${USER} && newgrp docker)"
-     exit 1
+  echo "Docker not found. Attempting installation using convenience script..."
+  echo "Note: This requires curl and sudo privileges."
+  if ! command_exists curl; then
+      install_package "curl" "${SUDO} ${PM} update -y && ${SUDO} ${PM} install -y curl"
   fi
-  echo "Docker daemon is running."
+  # Download and run the Docker installation script
+  if curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh; then
+      echo "Docker installed successfully via convenience script."
+      rm get-docker.sh # Clean up downloaded script
+      # Attempt to add user to docker group
+      echo "Adding current user ($USER) to the docker group..."
+      ${SUDO} usermod -aG docker $USER
+      echo "############################################################################"
+      echo "### IMPORTANT: Docker installed & user added to 'docker' group.        ###"
+      echo "### You MUST log out and log back in OR run 'newgrp docker' in your  ###"
+      echo "### terminal for group changes to take effect before running docker  ###"
+      echo "### commands without sudo.                                           ###"
+      echo "############################################################################"
+      # Check if docker daemon is running (might need a moment or manual start)
+      echo "Checking Docker service status..."
+      if ! systemctl is-active --quiet docker; then
+         echo "Attempting to start Docker service..."
+         ${SUDO} systemctl start docker
+         ${SUDO} systemctl enable docker # Enable on boot
+         sleep 5 # Give service time to start
+      fi
+  else
+      echo "Failed to install Docker using the convenience script."
+      echo "Please install Docker manually: https://docs.docker.com/engine/install/"
+      rm -f get-docker.sh # Clean up if download failed mid-way
+      exit 1
+  fi
+fi
+
+# Re-check Docker command and daemon status after installation attempt
+echo "Verifying Docker installation..."
+if ! command_exists docker; then
+   echo "ERROR: Docker command still not found after installation attempt."
+   exit 1
+fi
+echo "Docker command found: $(docker --version)"
+
+# Check daemon requires running docker command, which might fail if group membership not active
+# Use systemctl or equivalent to check service status instead of docker info initially
+if ! systemctl is-active --quiet docker; then
+    echo "WARNING: Docker service does not appear to be active."
+    echo "Please ensure the Docker service is running (e.g., 'sudo systemctl start docker')."
+    # Don't exit here, maybe user runs script then logs out/in and runs again
+    # Let the later docker compose commands fail if daemon is truly not running
+else
+    echo "Docker service appears to be active."
+    # Now try docker info with potential sudo if needed (might prompt for pass)
+    echo "Attempting to connect to Docker daemon... (May require newgrp docker or relogin if just installed)"
+    if ! docker info > /dev/null 2>&1; then
+        echo "WARNING: Could not connect to Docker daemon using current user."
+        echo "This might be due to group membership not being active yet."
+        echo "Try running 'newgrp docker' or logging out/in after the script finishes."
+        # Attempt with sudo as fallback verification
+        if ${SUDO} docker info > /dev/null 2>&1; then
+            echo "Confirmed Docker daemon is running via sudo."
+        else
+            echo "ERROR: Failed to connect to Docker daemon even with sudo."
+            echo "Please diagnose Docker installation and daemon status manually."
+            exit 1
+        fi
+    else
+        echo "Successfully connected to Docker daemon."
+    fi
 fi
 
 # 3. Docker Compose (V2)
@@ -135,44 +191,95 @@ if command_exists go; then
   echo "Go found: version ${INSTALLED_GO_VERSION}"
   # POSIX compliant version comparison: check if MIN_VERSION is the smallest when sorted
   if [ "$(printf '%s\n' "$GO_VERSION_MIN" "$INSTALLED_GO_VERSION" | sort -V | head -n 1)" != "$GO_VERSION_MIN" ]; then
-       echo "Go version ${INSTALLED_GO_VERSION} is older than required ${GO_VERSION_MIN}. Please upgrade Go."
-       echo "Installation instructions: https://go.dev/doc/install"
-       exit 1
+       echo "Go version ${INSTALLED_GO_VERSION} is older than required ${GO_VERSION_MIN}. Attempting upgrade/install..."
+       GO_INSTALL_NEEDED=true
   else
        echo "Go version is sufficient."
+       GO_INSTALL_NEEDED=false
   fi
 else
-  echo "Go not found."
-  echo "Please install Go ${GO_VERSION_MIN} or later manually: https://go.dev/doc/install"
-  exit 1
+  echo "Go not found. Attempting installation..."
+  GO_INSTALL_NEEDED=true
 fi
+
+if [ "$GO_INSTALL_NEEDED" = true ]; then
+  echo "Note: Installing Go via package manager. For specific versions or environments, consider manual install or a version manager like 'gvm'."
+  case "$PM" in
+      apt) install_package "Go" "${SUDO} apt-get update && ${SUDO} apt-get install -y golang-go" ;; # Installs golang-go package
+      yum) install_package "Go" "${SUDO} yum install -y golang" ;; # Installs golang package
+      brew) install_package "Go" "brew install go" ;; # Should already be handled, but for completeness
+      *) echo "Cannot automatically install Go for package manager ${PM}. Please install manually."; exit 1 ;;
+  esac
+  # Re-check Go version after installation
+  if command_exists go; then
+      INSTALLED_GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//' | cut -d. -f1,2)
+      echo "Go installed: version ${INSTALLED_GO_VERSION}"
+      if [ "$(printf '%s\n' "$GO_VERSION_MIN" "$INSTALLED_GO_VERSION" | sort -V | head -n 1)" != "$GO_VERSION_MIN" ]; then
+          echo "WARNING: Installed Go version ${INSTALLED_GO_VERSION} is still older than required ${GO_VERSION_MIN}."
+          echo "Manual upgrade or using a version manager (gvm) is recommended: https://go.dev/doc/install"
+          # Decide whether to exit or continue with warning
+          # exit 1
+      else
+           echo "Installed Go version meets requirements."
+      fi
+  else
+      echo "ERROR: Go installation failed or command still not found. Please install manually."
+      exit 1
+  fi
+fi
+
 export GOPATH=${GOPATH:-"$HOME/go"}
 export GOBIN=${GOBIN:-"$GOPATH/bin"}
 export PATH=$PATH:$GOBIN
 echo "Ensure \$GOPATH/bin is in your \$PATH."
 
-
 # 5. Node.js & npm (Still useful for chaincode development/testing later)
 NODE_VERSION_MIN="16"
 NPM_VERSION_MIN="8"
+NODE_INSTALL_NEEDED=false # Flag to track if install/upgrade needed
 if command_exists node && command_exists npm; then
   INSTALLED_NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
   INSTALLED_NPM_VERSION=$(npm -v | cut -d. -f1)
   echo "Node found: v$(node -v)"
   echo "npm found: v$(npm -v)"
   if [ "$INSTALLED_NODE_VERSION" -lt "$NODE_VERSION_MIN" ] || [ "$INSTALLED_NPM_VERSION" -lt "$NPM_VERSION_MIN" ]; then
-    echo "Node.js (>= v${NODE_VERSION_MIN}) or npm (>= v${NPM_VERSION_MIN}) version requirement not met."
-    echo "Please install/upgrade Node.js LTS (includes npm): https://nodejs.org/"
-    echo "Using a Node Version Manager (like nvm or fnm) is recommended."
-    exit 1
+    echo "Node.js (>= v${NODE_VERSION_MIN}) or npm (>= v${NPM_VERSION_MIN}) version requirement not met. Attempting install/upgrade..."
+    NODE_INSTALL_NEEDED=true
   else
     echo "Node.js and npm versions are sufficient."
   fi
 else
-  echo "Node.js or npm not found."
-  echo "Please install Node.js LTS (includes npm): https://nodejs.org/"
-  echo "Using a Node Version Manager (like nvm or fnm) is recommended."
-  exit 1
+  echo "Node.js or npm not found. Attempting installation..."
+  NODE_INSTALL_NEEDED=true
+fi
+
+if [ "$NODE_INSTALL_NEEDED" = true ]; then
+    echo "Note: Installing Node.js/npm via package manager. For specific versions (especially LTS), consider manual install or a version manager like 'nvm' or 'fnm'."
+    # Attempt installation using package manager
+    case "$PM" in
+      apt) install_package "Node.js & npm" "${SUDO} apt-get update && ${SUDO} apt-get install -y nodejs npm" ;; 
+      yum) install_package "Node.js & npm" "${SUDO} yum install -y nodejs npm" ;; # Might need EPEL repo or NodeSource setup for newer versions on older systems
+      brew) install_package "Node.js" "brew install node" ;; # Should already be handled
+      *) echo "Cannot automatically install Node.js/npm for package manager ${PM}. Please install manually."; exit 1;;
+    esac
+    # Re-check Node/npm versions after installation
+    if command_exists node && command_exists npm; then
+        INSTALLED_NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
+        INSTALLED_NPM_VERSION=$(npm -v | cut -d. -f1)
+        echo "Node installed: v$(node -v)"
+        echo "npm installed: v$(npm -v)"
+        if [ "$INSTALLED_NODE_VERSION" -lt "$NODE_VERSION_MIN" ] || [ "$INSTALLED_NPM_VERSION" -lt "$NPM_VERSION_MIN" ]; then
+            echo "WARNING: Installed Node.js/npm versions may still not meet requirements (v${NODE_VERSION_MIN}+/v${NPM_VERSION_MIN}+)."
+            echo "Using a Node Version Manager (like nvm: https://github.com/nvm-sh/nvm) is strongly recommended."
+            # Decide whether to exit or continue with warning
+            # exit 1 
+        else
+            echo "Installed Node.js and npm versions meet requirements."
+        fi
+    else
+        echo "ERROR: Node.js/npm installation failed or commands still not found. Please install manually."
+        exit 1
+    fi
 fi
 
 # 6. Python (Needed for some build/utility scripts in Fabric)
